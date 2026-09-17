@@ -1,0 +1,8 @@
+Assumptions:
+
+Camera points straight downward
+Marker lies flat on the ground
+UAS remains at a constant altitude
+Camera orientation does not change
+
+
