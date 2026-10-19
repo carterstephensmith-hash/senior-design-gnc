@@ -99,6 +99,18 @@ fprintf('Path margins: cross-track %.2f m, along-track %.2f m\n', crossTrackMarg
 wpDR1 = generateLawnmowerDR1(p, fp);
 wpDR2 = generateInsetLawnmower(p, fp, crossTrackMargin, alongTrackMargin);
 
+% Search starts where the drone reaches the area: the border point closest to launch
+entryPoint = min(max(m.launchPoint, [0 0]), [p.areaWidth p.areaLength]);
+wpDR2 = [entryPoint; wpDR2];
+
+% Search ends where the drone leaves the area: the border point closest to the last track end
+lastPoint = wpDR2(end,:);
+edges = [0, p.areaWidth, 0, p.areaLength];
+[~, k] = min(abs(lastPoint([1 1 2 2]) - edges));
+exitPoint = lastPoint;
+exitPoint(ceil(k/2)) = edges(k);
+wpDR2 = [wpDR2; exitPoint];
+
 trajDR1 = buildTrajectory(wpDR1, p.vCruise, p.accel, p.cornerHold, p.dt);
 trajDR2 = buildTrajectory(wpDR2, p.vCruise, p.accel, p.cornerHold, p.dt);
 
@@ -109,7 +121,7 @@ dr1ReportedTime = pathLengthDR1/0.5; % DR1 model: constant 0.5 m/s, instant turn
 fprintf('\nDR1 layout: %.1f m, DR1-reported %.1f s, kinematic %.1f s\n', ...
     pathLengthDR1, dr1ReportedTime, trajDR1.t(end));
 fprintf('DR2 layout: %.1f m, kinematic %.1f s (%d tracks)\n', ...
-    pathLengthDR2, trajDR2.t(end), size(wpDR2,1)/2);
+    pathLengthDR2, trajDR2.t(end), (size(wpDR2,1) - 2)/2);
 
 %% Monte Carlo on the DR2 path
 [X, Y] = meshgrid(0:p.gridSpacing:p.areaWidth, 0:p.gridSpacing:p.areaLength);
