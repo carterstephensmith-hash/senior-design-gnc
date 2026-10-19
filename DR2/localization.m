@@ -280,29 +280,34 @@ ConsistTable = table(mean(consistPos_nom), std(consistPos_nom), ...
                       mean(consistVel_nom), std(consistVel_nom), ...
     'VariableNames', {'PctInside3SigmaPos_mean','PctInside3SigmaPos_std', ...
                       'PctInside3SigmaVel_mean','PctInside3SigmaVel_std'});
-%% Path
+%% Path (DR2 inset lawnmower and kinematics, matches DR2/coveragePlanning.m)
 
 cov.areaWidth  = 5; % [m]
 cov.areaLength = 5; % [m]
-cov.speed = 0.5; % [m/s]
+cov.speed = 0.40; % [m/s] nominal cruise
+cov.accel = 0.50; % [m/s^2] commanded accel/decel on each leg (TBD)
+cov.cornerHold = 1.0; % [s] stop-and-settle at each waypoint (TBD)
 cov.hFOV = 60; % [deg]
+cov.imageResolution = [1920, 1080]; % [px] (TBD: selected camera)
 cov.altitude = 2; % [m]
 cov.overlap = 0.20;
+cov.markerSize = 0.08; % [m]
 
-footprintWidth = 2*cov.altitude*tand(cov.hFOV/2);
-trackSpacing = footprintWidth*(1 - cov.overlap);
+% 3-sigma margins: 5 cm position error + 1 deg attitude jitter, plus tilt while accelerating
+cov.crossTrackMargin = 3*0.05 + cov.altitude*tand(3*1.0);
+cov.alongTrackMargin = cov.crossTrackMargin + cov.altitude*cov.accel/9.81;
 
-waypoints = generateLawnmowerPath(cov.areaWidth, cov.areaLength, trackSpacing, cov.altitude);
+waypoints = generateInsetLawnmower(cov);
+traj = buildTrajectory(waypoints, cov.speed, cov.accel, cov.cornerHold, 0.01);
+searchTime_path = traj.t(end);
 
-[rawPositions, rawTime] = samplePathUniform(waypoints, cov.speed, 0.01);
-searchTime_path = rawTime(end);
-
+% Resample the commanded trajectory onto the IMU time grid; truth velocity and
+% acceleration come from the trapezoidal profile, not numerical differentiation
 t_path = 0:dt:searchTime_path;
 N_path = length(t_path);
-p_true_path = interp1(rawTime, rawPositions, t_path, 'linear', 'extrap')';
-
-v_true_path = [gradient(p_true_path(1,:),dt); gradient(p_true_path(2,:),dt); gradient(p_true_path(3,:),dt)];
-a_true_path = [gradient(v_true_path(1,:),dt); gradient(v_true_path(2,:),dt); gradient(v_true_path(3,:),dt)];
+p_true_path = [interp1(traj.t, traj.pos, t_path)'; cov.altitude*ones(1,N_path)];
+v_true_path = [interp1(traj.t, traj.vel, t_path)'; zeros(1,N_path)];
+a_true_path = [interp1(traj.t, traj.acc, t_path)'; zeros(1,N_path)];
 
 distAlongPath = [0, cumsum(vecnorm(diff(p_true_path,1,2),2,1))];
 
@@ -425,39 +430,104 @@ legend({'True path','Raw RTK estimate','Filtered estimate','RTK outage segment'}
        'Location','bestoutside')
 
 
-function waypoints = generateLawnmowerPath(area_width, area_length, trackSpacing, altitude)
-    xlines = 0:trackSpacing:area_width;
-    if mod(area_width, trackSpacing) ~= 0
-        xlines = [xlines, area_width];
+% DR2 inset lawnmower (same layout as DR2/coveragePlanning.m): tracks inset so
+% the footprint, shrunk by half a marker and the 3-sigma margins, still reaches
+% every possible marker centre
+function waypoints = generateInsetLawnmower(cov)
+    vFOV = 2*atand((cov.imageResolution(2)/cov.imageResolution(1))*tand(cov.hFOV/2));
+    half = cov.markerSize/2;
+    halfWidth = cov.altitude*tand(cov.hFOV/2) - half - cov.crossTrackMargin;
+    halfLength = cov.altitude*tand(vFOV/2) - half - cov.alongTrackMargin;
+
+    span = cov.areaWidth - 2*half;
+    trackSpacing = 2*halfWidth*(1 - cov.overlap);
+    nTracks = max(1, ceil((span - 2*halfWidth)/trackSpacing) + 1);
+
+    if nTracks == 1
+        xlines = cov.areaWidth/2;
+    else
+        xlines = linspace(half + halfWidth, cov.areaWidth - half - halfWidth, nTracks);
     end
+
+    yLow = min(half + halfLength, cov.areaLength/2);
+    yHigh = max(cov.areaLength - half - halfLength, cov.areaLength/2);
+
     waypoints = [];
-    for i = 1:length(xlines)
-        x = xlines(i);
+    for i = 1:nTracks
         if mod(i,2) == 1
-            yStart = 0; yEnd = area_length;
+            ys = [yLow, yHigh];
         else
-            yStart = area_length; yEnd = 0;
+            ys = [yHigh, yLow];
         end
-        waypoints = [waypoints; x, yStart, altitude; x, yEnd, altitude];
+        waypoints = [waypoints; xlines(i), ys(1); xlines(i), ys(2)];
     end
 end
 
-function [positions, time] = samplePathUniform(waypoints, speed, sampleSpacing)
-    positions = [];
+% Each leg starts and ends at rest with a trapezoidal speed profile, followed by
+% a settle hold at the waypoint (same as DR2/coveragePlanning.m)
+function traj = buildTrajectory(waypoints, speed, accel, cornerHold, dt)
+    t = 0; pos = waypoints(1,:); vel = [0 0]; acc = [0 0];
+    tNow = 0;
+
     for i = 1:size(waypoints,1)-1
         startPoint = waypoints(i,:);
-        endPoint   = waypoints(i+1,:);
-        segmentLength = norm(endPoint - startPoint);
-        numberOfPoints = max(2, ceil(segmentLength/sampleSpacing) + 1);
-        fraction = linspace(0,1,numberOfPoints)';
-        segmentPositions = startPoint + fraction.*(endPoint-startPoint);
-        if i > 1
-            segmentPositions = segmentPositions(2:end,:);
+        endPoint = waypoints(i+1,:);
+        legLength = norm(endPoint - startPoint);
+        if legLength < 1e-10, continue; end
+        direction = (endPoint - startPoint)/legLength;
+
+        [tau, s, sd, sdd] = trapezoidProfile(legLength, speed, accel, dt);
+        tau = tau(2:end); s = s(2:end); sd = sd(2:end); sdd = sdd(2:end);
+
+        t = [t; tNow + tau];
+        pos = [pos; startPoint + s.*direction];
+        vel = [vel; sd.*direction];
+        acc = [acc; sdd.*direction];
+        tNow = t(end);
+
+        nHold = round(cornerHold/dt);
+        if nHold > 0
+            t = [t; tNow + (1:nHold)'*dt];
+            pos = [pos; repmat(endPoint, nHold, 1)];
+            vel = [vel; zeros(nHold, 2)];
+            acc = [acc; zeros(nHold, 2)];
+            tNow = t(end);
         end
-        positions = [positions; segmentPositions];
     end
-    positionChanges = diff(positions);
-    segmentDistances = sqrt(sum(positionChanges.^2, 2));
-    distance = [0; cumsum(segmentDistances)];
-    time = distance/speed;
+
+    traj.t = t; traj.pos = pos; traj.vel = vel; traj.acc = acc;
+end
+
+function [tau, s, sd, sdd] = trapezoidProfile(legLength, speed, accel, dt)
+    tAccel = speed/accel;
+    dAccel = 0.5*accel*tAccel^2;
+
+    if 2*dAccel > legLength      % triangular: never reaches cruise speed
+        tAccel = sqrt(legLength/accel);
+        speed = accel*tAccel;
+        tCruise = 0;
+    else
+        tCruise = (legLength - 2*dAccel)/speed;
+    end
+
+    T = 2*tAccel + tCruise;
+    tau = (0:dt:T)';
+    if T - tau(end) > 1e-9, tau = [tau; T]; end
+
+    s = zeros(size(tau)); sd = s; sdd = s;
+    phase1 = tau <= tAccel;
+    phase2 = tau > tAccel & tau <= tAccel + tCruise;
+    phase3 = tau > tAccel + tCruise;
+
+    s(phase1) = 0.5*accel*tau(phase1).^2;
+    sd(phase1) = accel*tau(phase1);
+    sdd(phase1) = accel;
+
+    s(phase2) = 0.5*accel*tAccel^2 + speed*(tau(phase2) - tAccel);
+    sd(phase2) = speed;
+
+    td = tau(phase3) - tAccel - tCruise;
+    s(phase3) = 0.5*accel*tAccel^2 + speed*tCruise + speed*td - 0.5*accel*td.^2;
+    sd(phase3) = speed - accel*td;
+    sdd(phase3) = -accel;
 end
