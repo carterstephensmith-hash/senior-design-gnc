@@ -42,11 +42,11 @@ p.attitudeJitterStd = 1.0;    % [deg] 1-sigma roll/pitch jitter about commanded 
 p.posErrorTau = 2.0;          % [s] correlation time of position/altitude error
 p.attitudeTau = 0.5;          % [s] correlation time of attitude jitter
 
-%% Camera (TBD: replace with selected camera datasheet values)
-p.imageResolution = [1920, 1080]; % [px] operating resolution (DR1: >= 1080p)
-p.hFOV = 60;                  % [deg] horizontal FOV, long axis mounted cross-track
-p.frameRate = 10;             % [Hz] frames processed for detection on the Pi 5 (TBD)
-p.exposure = 0.005;           % [s] exposure time (TBD)
+%% Camera: Arducam B029201 (8MP Sony IMX219, USB 2.0, autofocus), datasheet values
+p.imageResolution = [3264, 2448]; % [px] full 8MP, MJPEG at max 15 fps (2048x1536 fallback if Pi can't keep up)
+p.hFOV = 60;                  % [deg] horizontal FOV (datasheet), long axis mounted cross-track
+p.frameRate = 10;             % [Hz] frames processed on the Pi 5; camera max 15 fps at 8MP (TBD: bench test)
+p.exposure = 0.003;           % [s] manual exposure; <= ~3.5 ms keeps blur under 2 px at 0.4 m/s (TBD: bench test)
 p.vFOV = 2*atand((p.imageResolution(2)/p.imageResolution(1))*tand(p.hFOV/2));
 
 %% Marker recognition criteria

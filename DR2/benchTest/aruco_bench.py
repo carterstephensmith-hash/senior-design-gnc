@@ -13,6 +13,10 @@ Examples:
 
     # Fixed 4 ms exposure, camera 2.0 m above an 8 cm marker
     python aruco_bench.py --label h200_8cm_exp4ms --exposure-us 4000 --height-m 2.0 --marker-cm 8
+
+    # Arducam B029201 (USB): full 8MP, 3 ms exposure, focus locked (find the sharp
+    # value at 2 m first with: v4l2-ctl -d /dev/video0 --list-ctrls)
+    python aruco_bench.py --usb --width 3264 --height 2448 --exposure-us 3000 --focus 0 --label usb_8mp
 """
 import argparse
 import csv
@@ -25,12 +29,22 @@ import numpy as np
 
 def open_camera(args):
     if args.usb:
-        cap = cv2.VideoCapture(args.usb_index)
+        cap = cv2.VideoCapture(args.usb_index, cv2.CAP_V4L2)
+        # USB 2.0 only carries high resolutions as MJPEG (Arducam B029201: 15 fps at 3264x2448)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         if args.exposure_us:
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # manual on V4L2; driver dependent
-            cap.set(cv2.CAP_PROP_EXPOSURE, args.exposure_us / 100.0)
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # V4L2 manual mode
+            cap.set(cv2.CAP_PROP_EXPOSURE, args.exposure_us / 100.0)  # V4L2 units of 100 us
+        if args.focus >= 0:
+            cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)  # lock focus so it can't hunt in flight
+            cap.set(cv2.CAP_PROP_FOCUS, args.focus)
+
+        actual = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        if actual != (args.width, args.height):
+            print(f"WARNING: camera gave {actual[0]}x{actual[1]}, not {args.width}x{args.height}")
+        print(f"exposure setting reads back as {cap.get(cv2.CAP_PROP_EXPOSURE)} (x100 us)")
 
         def grab():
             ok, frame = cap.read()
@@ -77,6 +91,7 @@ def main():
     parser.add_argument("--save-every", type=int, default=50, help="save every Nth annotated frame (0 = never)")
     parser.add_argument("--usb", action="store_true", help="use a USB webcam instead of picamera2")
     parser.add_argument("--usb-index", type=int, default=0)
+    parser.add_argument("--focus", type=int, default=-1, help="USB: fixed focus value, autofocus off (-1 = leave auto)")
     args = parser.parse_args()
 
     out_dir = os.path.join("results", args.label)

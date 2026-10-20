@@ -8,7 +8,7 @@ nSeeds = 50;
 
 %% Rates 
 imuRate = 200; % [Hz] IMU sample rate 
-rtkRate = 20; % [Hz] given spec
+rtkRate = 20; % [Hz] H-RTK F9P datasheet: 20 Hz only in GPS-only mode; lower with multiple constellations
 dt = 1/imuRate;
 t = 0:dt:30;
 N = length(t);
@@ -32,9 +32,11 @@ v_true = [vx_true; vy_true; vz_true];
 a_true = [ax_true; ay_true; az_true];
 
 %% Sensor specs
-% RTK (H-RTK ZED-F9P Ultralight)
+% RTK (H-RTK ZED-F9P Ultralight): datasheet 1 cm + 1 ppm horizontal (CEP), vertical not listed
 rtkNoiseStd = 0.01; % [m], RTK position accuracy
-rtkVelNoiseStd = 0.05; % [m/s], RTK velocity accuracy
+rtkVelNoiseStd = 0.05; % [m/s], RTK velocity accuracy (datasheet D-GNSS 0.05 m/s)
+
+% IMU: ICM-42688-P in the Pixhawk 6C mini (also carries a BMI088)
 
 accelNoiseDensity_ug_rtHz = 70; % ug/rtHz
 accelNoiseStd = accelNoiseDensity_ug_rtHz*1e-6*9.81*sqrt(imuRate); % [m/s^2]
@@ -288,7 +290,7 @@ cov.speed = 0.40; % [m/s] nominal cruise
 cov.accel = 0.50; % [m/s^2] commanded accel/decel on each leg (TBD)
 cov.cornerHold = 1.0; % [s] stop-and-settle at each waypoint (TBD)
 cov.hFOV = 60; % [deg]
-cov.imageResolution = [1920, 1080]; % [px] (TBD: selected camera)
+cov.imageResolution = [3264, 2448]; % [px] Arducam B029201, full 8MP (match coveragePlanning.m)
 cov.altitude = 2; % [m]
 cov.overlap = 0.20;
 cov.markerSize = 0.08; % [m]
