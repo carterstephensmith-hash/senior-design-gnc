@@ -1,58 +1,101 @@
-function plotMonteCarloPaths(waypoints, p_true, directPaths, kfPaths, tolerance, plotTitle)
+function plotMonteCarloPaths(waypoints, p_true, directPaths, kfPaths, ...
+    tolerance, plotTitle)
 
-    pathBand = polybuffer(waypoints(:, 1:2), 'lines', tolerance);
+    %% Setup
+
+    pathBand = polybuffer(waypoints(:,1:2), 'lines', tolerance);
 
     paths = {directPaths, kfPaths};
-    methodNames = {'Direct RTK + IMU', 'Kalman filter'};
+    methodNames = {'Direct RTK + IMU', 'Kalman Filter'};
 
-    % Light colors help distinguish overlapping trials
-    colors = [0.55, 0.75, 0.95;
-              0.95, 0.65, 0.45];
+    % Colors
+    colors = [0.25, 0.55, 0.85;    % Direct RTK + IMU
+              0.90, 0.40, 0.20];   % Kalman filter
 
-    nTrials = size(directPaths, 3);
+    bandColor = [0.70, 0.85, 0.70];
+    trueColor = [0.10, 0.10, 0.10];
 
-    figure;
-    tiledlayout(1, 2, 'TileSpacing', 'compact');
-    sgtitle(plotTitle);
+    nTrials = size(directPaths,3);
 
-    ax = gobjects(1, 2);
+    %% Plot Monte Carlo trajectories
+
+    figure('Name',plotTitle,'NumberTitle','off','Color','w');
+    
+    tl = tiledlayout(1,2, ...
+        'TileSpacing','compact', ...
+        'Padding','compact');
+
+    sgtitle(tl,plotTitle, ...
+        'FontSize',14, ...
+        'FontWeight','bold');
+
+    ax = gobjects(1,2);
 
     for method = 1:2
 
         ax(method) = nexttile;
-        hold on;
+        hold(ax(method),'on');
 
-        hBand = plot(pathBand, 'FaceColor', [0.70, 0.85, 0.70], 'FaceAlpha', 0.35, 'EdgeColor', 'none');
+        % Allowable horizontal path corridor
+        hBand = plot(ax(method),pathBand, ...
+            'FaceColor',bandColor, ...
+            'FaceAlpha',0.35, ...
+            'EdgeColor','none');
 
-        % Each matrix column contains one trial's trajectory
+        % Extract individual Monte Carlo trajectories
         methodPaths = paths{method};
-        nSamples = size(methodPaths, 2);
+        nSamples = size(methodPaths,2);
 
-        east = reshape(methodPaths(1, :, :), nSamples, nTrials);
-        north = reshape(methodPaths(2, :, :), nSamples, nTrials);
+        east = reshape(methodPaths(1,:,:),nSamples,nTrials);
+        north = reshape(methodPaths(2,:,:),nSamples,nTrials);
 
-        hEstimates = plot(east, north, 'Color', colors(method, :), 'LineWidth', 0.5);
+        % Plot all trial trajectories
+        hEstimates = plot(ax(method),east,north, ...
+            'Color',colors(method,:), ...
+            'LineWidth',0.7);
 
-        % Draw the true path last so it remains visible
-        hTrue = plot(p_true(1, :), p_true(2, :), 'k--', 'LineWidth', 1.8);
+        % True trajectory
+        hTrue = plot(ax(method),p_true(1,:),p_true(2,:), ...
+            '--', ...
+            'Color',trueColor, ...
+            'LineWidth',2);
 
-        xlabel('East (m)');
-        ylabel('North (m)');
-        title(methodNames{method});
+        % Labels and formatting
+        xlabel(ax(method),'East (m)');
+        ylabel(ax(method),'North (m)');
+        title(ax(method),methodNames{method}, ...
+            'FontSize',12, ...
+            'FontWeight','bold');
 
-        legend([hTrue, hBand, hEstimates(1)], {'True path', sprintf('%.0f cm horizontal path band', 100*tolerance), ...
-             'Individual Monte Carlo trajectories'}, 'Location', 'best');
+        grid(ax(method),'on');
+        box(ax(method),'on');
+        axis(ax(method),'equal');
 
-        axis equal;
-        grid on;
-        box on;
+        set(ax(method), ...
+            'FontSize',11, ...
+            'LineWidth',0.8, ...
+            'Layer','top');
+
+        legend(ax(method), ...
+            [hTrue,hBand,hEstimates(1)], ...
+            {'True path', ...
+             sprintf('Path corridor (\\pm %.0f cm)',100*tolerance), ...
+             'Monte Carlo trajectories'}, ...
+            'Location','best', ...
+            'FontSize',9);
 
     end
 
-    % Give both panels the same coordinate limits for fair comparison
+    %% Match coordinate limits across both panels
+
     combinedXLimits = [ax(1).XLim, ax(2).XLim];
     combinedYLimits = [ax(1).YLim, ax(2).YLim];
 
-    set(ax, 'XLim', [min(combinedXLimits), max(combinedXLimits)], 'YLim', [min(combinedYLimits), max(combinedYLimits)]);
+    commonXLimits = [min(combinedXLimits),max(combinedXLimits)];
+    commonYLimits = [min(combinedYLimits),max(combinedYLimits)];
+
+    set(ax, ...
+        'XLim',commonXLimits, ...
+        'YLim',commonYLimits);
 
 end

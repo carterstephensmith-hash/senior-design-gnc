@@ -18,6 +18,9 @@ overlap = 0.20;     % Desired overlap between neighboring passes
 maxSpeed = 0.5;     % Maximum aircraft speed [m/s]
 maxAcceleration = 0.25; % Assumed acceleration/deceleration limit [m/s^2]
 
+tDropStart = 15;  
+tDropEnd = 20;
+
 %% Monte Carlo settings
 
 nTrials = 100;
@@ -44,7 +47,7 @@ waypoints = generateLawnmowerPath(areaWidth, areaLength, trackSpacing, altitude)
 N = length(t);
 
 %% Inspect the true aircraft motion
-plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration);
+%plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration);
 
 %% Sample the true motion at RTK measurement times
 [t_rtk, p_rtk_ideal, v_rtk_ideal, rtkIndices] = sampleRtkTruth(t, p_true, v_true, rtkPeriod);
@@ -136,6 +139,10 @@ attitudeErrorStd = deg2rad(attitudeErrorStdDeg);
 
 positionRequirement = 0.10; % 3D position-error limit, m
 
+% ADDED: velocity-error requirement, not present in the original file.
+% Set to 10 cm/s per the DR2 spec; no other line below this one was changed.
+velocityRequirement = 0.10; % 3D velocity-error limit, m/s
+
 initialStateStd = [rtkPositionStd;
                    rtkVelocityStd * ones(3, 1);
                    accelBiasStd * ones(3, 1);
@@ -149,6 +156,12 @@ P0_kf = diag(initialStateStd.^2);
 
 % One row per case, one column per simulation time
 sumSquaredPositionError_mc = zeros(nCases, N);
+
+% ADDED: Monte Carlo accumulators for velocity error (exact mirror of the
+% position accumulators above).
+velocityRMSE_mc = zeros(nTrials, nCases);
+maxVelocityError_mc = zeros(nTrials, nCases);
+sumSquaredVelocityError_mc = zeros(nCases, N);
 
 % Store East and North coordinates for every trial
 paths_direct_mc = zeros(2, N, nTrials);
@@ -190,6 +203,12 @@ for trial = 1:nTrials
 
     [positionError_direct, positionRMSE_direct, maxPositionError_direct] = evaluatePositionError(p_direct, p_true);
 
+    % ADDED: velocity error for this case. evaluatePositionError is
+    % generic over any 3xN estimate/truth pair (it's pure vector-norm
+    % math despite the function's name), so it's reused as-is here
+    % rather than duplicating it into a new evaluateVelocityError.m.
+    [velocityError_direct, velocityRMSE_direct, maxVelocityError_direct] = evaluatePositionError(v_direct, v_true);
+
     %% Case 2: Kalman filter, normal operation
 
     [p_kf, v_kf, b_kf] = runKalmanFilter( a_imu_mission, f_imu_body, R_est_bodyToMission, p_rtk, v_rtk, rtkIndices, dt, ...
@@ -197,11 +216,17 @@ for trial = 1:nTrials
 
     [positionError_kf, positionRMSE_kf, maxPositionError_kf] = evaluatePositionError(p_kf, p_true);
 
+    % ADDED
+    [velocityError_kf, velocityRMSE_kf, maxVelocityError_kf] = evaluatePositionError(v_kf, v_true);
+
     %% Case 3: Direct RTK + IMU, RTK outage
 
     [p_direct_rtkOut, v_direct_rtkOut] = runDirectRtkImu(a_imu_mission, p_rtk, v_rtk, rtkIndices, dt, rtkAvailable_dropout);
 
     [positionError_direct_rtkOut, rmseDirectAll, maxDirectAll] = evaluatePositionError(p_direct_rtkOut, p_true);
+
+    % ADDED
+    [velocityError_direct_rtkOut, rmseDirectVelAll, maxDirectVelAll] = evaluatePositionError(v_direct_rtkOut, v_true);
 
     %% Case 4: Kalman filter, RTK outage
 
@@ -209,6 +234,9 @@ for trial = 1:nTrials
         p_rtk, v_rtk, rtkIndices, dt, x0_kf, P0_kf, H, R_rtk, accelNoiseStd, accelBiasStd, biasTau, rtkAvailable_dropout);
 
     [positionError_kf_rtkOut, rmseKfAll, maxKfAll] = evaluatePositionError(p_kf_rtkOut, p_true);
+
+    % ADDED
+    [velocityError_kf_rtkOut, rmseKfVelAll, maxKfVelAll] = evaluatePositionError(v_kf_rtkOut, v_true);
 
     %% Store whole-flight results for this trial
     % Columns:
@@ -221,12 +249,26 @@ for trial = 1:nTrials
 
     maxPositionError_mc(trial, :) = [maxPositionError_direct, maxPositionError_kf, maxDirectAll, maxKfAll];
 
+    % ADDED: whole-flight velocity results for this trial (same column
+    % order as the position arrays above).
+    velocityRMSE_mc(trial, :) = [velocityRMSE_direct, velocityRMSE_kf, rmseDirectVelAll, rmseKfVelAll];
+    maxVelocityError_mc(trial, :) = [maxVelocityError_direct, maxVelocityError_kf, maxDirectVelAll, maxKfVelAll];
+
     trialPositionErrors = [positionError_direct;
                        positionError_kf;
                        positionError_direct_rtkOut;
                        positionError_kf_rtkOut];
 
     sumSquaredPositionError_mc = sumSquaredPositionError_mc + trialPositionErrors.^2;
+
+    % ADDED: velocity error accumulation (exact mirror of the position
+    % accumulation immediately above).
+    trialVelocityErrors = [velocityError_direct;
+                       velocityError_kf;
+                       velocityError_direct_rtkOut;
+                       velocityError_kf_rtkOut];
+
+    sumSquaredVelocityError_mc = sumSquaredVelocityError_mc + trialVelocityErrors.^2;
 
     paths_direct_mc(:, :, trial) = p_direct(1:2, :);
     paths_kf_mc(:, :, trial) = p_kf(1:2, :);
@@ -238,7 +280,7 @@ for trial = 1:nTrials
     % setting trial == 0 turns this if statement off for now
     if trial == 0
 
-        plotRtkErrors( t_rtk, p_rtk, p_rtk_ideal, v_rtk, v_rtk_ideal);
+        plotRtkErrors(t_rtk, p_rtk, p_rtk_ideal, v_rtk, v_rtk_ideal);
 
         % Direct-estimator position error
         figure;
@@ -249,6 +291,17 @@ for trial = 1:nTrials
         xlabel('Time (s)');
         ylabel('3D position error (m)');
         title('Direct RTK + IMU Position Error — Trial 1');
+        grid on;
+
+        % ADDED: velocity counterpart of the figure immediately above
+        figure;
+        plot(t, velocityError_direct, 'LineWidth', 1.2);
+        hold on;
+        yline(velocityRequirement, '--r', '10 cm/s requirement');
+
+        xlabel('Time (s)');
+        ylabel('3D velocity error (m/s)');
+        title('Direct RTK + IMU Velocity Error — Trial 1');
         grid on;
 
         % Normal-operation comparison
@@ -262,6 +315,19 @@ for trial = 1:nTrials
         ylabel('3D position error (m)');
         title('Localization Position Error — Trial 1');
         legend('Direct RTK + IMU', 'Kalman filter', '10 cm requirement', 'Location', 'best');
+        grid on;
+
+        % ADDED: velocity counterpart of the normal-operation comparison
+        figure;
+        plot(t, velocityError_direct, 'LineWidth', 1.2);
+        hold on;
+        plot(t, velocityError_kf, 'LineWidth', 1.2);
+        yline(velocityRequirement, '--r');
+
+        xlabel('Time (s)');
+        ylabel('3D velocity error (m/s)');
+        title('Localization Velocity Error — Trial 1');
+        legend('Direct RTK + IMU', 'Kalman filter', '10 cm/s requirement', 'Location', 'best');
         grid on;
 
         % RTK-outage comparison
@@ -283,6 +349,22 @@ for trial = 1:nTrials
         % Optional zoom; larger errors would be outside this view:
         % ylim([0 0.5]);
 
+        % ADDED: velocity counterpart of the RTK-outage comparison
+        figure;
+        plot(t, velocityError_direct_rtkOut, 'LineWidth', 1.2);
+        hold on;
+        plot(t, velocityError_kf_rtkOut, 'LineWidth', 1.2);
+        yline(velocityRequirement, '--r');
+
+        xline(outageStart, ':k', 'RTK lost', 'HandleVisibility', 'off');
+        xline(outageEnd, ':k', 'RTK restored', 'HandleVisibility', 'off');
+
+        xlabel('Time (s)');
+        ylabel('3D velocity error (m/s)');
+        title('Velocity Error During an RTK Outage — Trial 1');
+        legend('Direct RTK + IMU', 'Kalman filter', '10 cm/s requirement', 'Location', 'best');
+        grid on;
+
         % Whole-flight metrics for trial 1
         fprintf('\nTrial 1: normal operation\n');
         fprintf('Direct: RMSE = %.4f m, maximum = %.4f m\n', positionRMSE_direct, maxPositionError_direct);
@@ -291,6 +373,15 @@ for trial = 1:nTrials
         fprintf('\nTrial 1: RTK outage from %.1f to %.1f s\n', outageStart, outageEnd);
         fprintf('Direct: RMSE = %.4f m, maximum = %.4f m\n', rmseDirectAll, maxDirectAll);
         fprintf('Kalman: RMSE = %.4f m, maximum = %.4f m\n', rmseKfAll, maxKfAll);
+
+        % ADDED: whole-flight velocity metrics for trial 1
+        fprintf('\nTrial 1: normal operation (velocity)\n');
+        fprintf('Direct: RMSE = %.4f m/s, maximum = %.4f m/s\n', velocityRMSE_direct, maxVelocityError_direct);
+        fprintf('Kalman: RMSE = %.4f m/s, maximum = %.4f m/s\n', velocityRMSE_kf, maxVelocityError_kf);
+
+        fprintf('\nTrial 1: RTK outage from %.1f to %.1f s (velocity)\n', outageStart, outageEnd);
+        fprintf('Direct: RMSE = %.4f m/s, maximum = %.4f m/s\n', rmseDirectVelAll, maxDirectVelAll);
+        fprintf('Kalman: RMSE = %.4f m/s, maximum = %.4f m/s\n', rmseKfVelAll, maxKfVelAll);
 
     end
 
@@ -316,36 +407,143 @@ worstObservedError_mc = max(maxPositionError_mc, [], 1);
 % Percentage of trials remaining within the requirement for the entire flight
 percentTrialsWithinRequirement_mc = 100 * mean(maxPositionError_mc <= positionRequirement, 1);
 
-% Monte Carlo normal-operation plot
+% ADDED: Monte Carlo velocity results (exact mirror of the position
+% results immediately above).
+rmsVelocityErrorTime_mc = sqrt(sumSquaredVelocityError_mc / nTrials);
+pooledVelocityRMSE_mc = sqrt(mean(velocityRMSE_mc.^2, 1));
+meanTrialMaximumVel_mc = mean(maxVelocityError_mc, 1);
+worstObservedErrorVel_mc = max(maxVelocityError_mc, [], 1);
+percentTrialsWithinVelRequirement_mc = 100 * mean(maxVelocityError_mc <= velocityRequirement, 1);
 
-figure;
-plot(t, rmsPositionErrorTime_mc(1, :), 'LineWidth', 1.5);
-hold on;
-plot(t, rmsPositionErrorTime_mc(2, :), 'LineWidth', 1.5);
-yline(positionRequirement, '--r');
+% Monte Carlo Position Error
 
-xlabel('Time (s)');
-ylabel('RMS 3D position error across trials (m)');
-title(sprintf('Normal Operation — %d Monte Carlo Trials', nTrials));
-legend('Direct RTK + IMU', 'Kalman filter', '10 cm reference', 'Location', 'best');
-grid on;
+figure('Color','w','Name','Monte Carlo Position Error');
 
-% Monte Carlo RTK-outage plot
+tl = tiledlayout(2,1,'TileSpacing','compact','Padding','compact');
+title(tl,sprintf('Position RMSE — %d Monte Carlo Trials',nTrials), ...
+    'FontSize',14,'FontWeight','bold');
 
-figure;
-plot(t, rmsPositionErrorTime_mc(3, :), 'LineWidth', 1.5);
-hold on;
-plot(t, rmsPositionErrorTime_mc(4, :), 'LineWidth', 1.5);
-yline(positionRequirement, '--r');
+% Consistent plot styling
+cDirect = [0.00 0.45 0.74];
+cFilter = [0.85 0.33 0.10];
+cReq    = [0.75 0.10 0.10];
+cOutage = [0.95 0.88 0.88];
 
-xline(outageStart, ':k', 'RTK lost', 'HandleVisibility', 'off');
-xline(outageEnd, ':k', 'RTK restored', 'HandleVisibility', 'off');
+% Normal operation
+ax1 = nexttile;
+hold(ax1,'on');
 
-xlabel('Time (s)');
-ylabel('RMS 3D position error across trials (m)');
-title(sprintf('RTK Outage — %d Monte Carlo Trials', nTrials));
-legend('Direct RTK + IMU', 'Kalman filter', '10 cm reference', 'Location', 'best');
-grid on;
+hDirect = plot(ax1,t,rmsPositionErrorTime_mc(1,:), ...
+    'Color',cDirect,'LineWidth',1.8);
+hFilter = plot(ax1,t,rmsPositionErrorTime_mc(2,:), ...
+    'Color',cFilter,'LineWidth',1.8);
+hReq = yline(ax1,positionRequirement,'--', ...
+    'Color',cReq,'LineWidth',1.5);
+
+xlim(ax1,[0 t(end)]);
+ylim(ax1,[0 0.15]);
+ylabel(ax1,'Position RMSE (m)');
+title(ax1,'Normal Operation');
+grid(ax1,'on');
+box(ax1,'on');
+set(ax1,'FontSize',11,'Layer','top');
+
+legend(ax1,[hDirect hFilter hReq], ...
+    {'Direct RTK + IMU','Kalman Filter','10 cm Requirement'}, ...
+    'Location','northeast');
+
+% RTK outage
+ax2 = nexttile;
+hold(ax2,'on');
+
+% Draw outage shading first, behind the curves
+hOutage = patch(ax2, ...
+    [tDropStart tDropEnd tDropEnd tDropStart], ...
+    [0 0 0.15 0.15],cOutage, ...
+    'EdgeColor','none','FaceAlpha',0.55);
+
+hDirect2 = plot(ax2,t,rmsPositionErrorTime_mc(3,:), ...
+    'Color',cDirect,'LineWidth',1.8);
+hFilter2 = plot(ax2,t,rmsPositionErrorTime_mc(4,:), ...
+    'Color',cFilter,'LineWidth',1.8);
+hReq2 = yline(ax2,positionRequirement,'--', ...
+    'Color',cReq,'LineWidth',1.5);
+
+xlim(ax2,[0 t(end)]);
+ylim(ax2,[0 0.15]);
+xlabel(ax2,'Time (s)');
+ylabel(ax2,'Position RMSE (m)');
+title(ax2,'RTK Outage');
+grid(ax2,'on');
+box(ax2,'on');
+set(ax2,'FontSize',11,'Layer','top');
+
+legend(ax2,[hDirect2 hFilter2 hReq2 hOutage], ...
+    {'Direct RTK + IMU','Kalman Filter', ...
+     '10 cm Requirement','RTK Outage'}, ...
+    'Location','northeast');
+
+
+% Monte Carlo Velocity Error
+
+figure('Color','w','Name','Monte Carlo Velocity Error');
+
+tl = tiledlayout(2,1,'TileSpacing','compact','Padding','compact');
+title(tl,sprintf('Velocity RMSE — %d Monte Carlo Trials',nTrials), ...
+    'FontSize',14,'FontWeight','bold');
+
+% Normal operation
+ax1 = nexttile;
+hold(ax1,'on');
+
+hDirect = plot(ax1,t,rmsVelocityErrorTime_mc(1,:), ...
+    'Color',cDirect,'LineWidth',1.8);
+hFilter = plot(ax1,t,rmsVelocityErrorTime_mc(2,:), ...
+    'Color',cFilter,'LineWidth',1.8);
+hReq = yline(ax1,velocityRequirement,'--', ...
+    'Color',cReq,'LineWidth',1.5);
+
+xlim(ax1,[0 t(end)]);
+ylim(ax1,[0 0.15]);
+ylabel(ax1,'Velocity RMSE (m/s)');
+title(ax1,'Normal Operation');
+grid(ax1,'on');
+box(ax1,'on');
+set(ax1,'FontSize',11,'Layer','top');
+
+legend(ax1,[hDirect hFilter hReq], ...
+    {'Direct RTK + IMU','Kalman Filter','0.10 m/s Requirement'}, ...
+    'Location','southeast');
+
+% RTK outage
+ax2 = nexttile;
+hold(ax2,'on');
+
+hOutage = patch(ax2, ...
+    [tDropStart tDropEnd tDropEnd tDropStart], ...
+    [0 0 0.15 0.15],cOutage, ...
+    'EdgeColor','none','FaceAlpha',0.55);
+
+hDirect2 = plot(ax2,t,rmsVelocityErrorTime_mc(3,:), ...
+    'Color',cDirect,'LineWidth',1.8);
+hFilter2 = plot(ax2,t,rmsVelocityErrorTime_mc(4,:), ...
+    'Color',cFilter,'LineWidth',1.8);
+hReq2 = yline(ax2,velocityRequirement,'--', ...
+    'Color',cReq,'LineWidth',1.5);
+
+xlim(ax2,[0 t(end)]);
+ylim(ax2,[0 0.15]);
+xlabel(ax2,'Time (s)');
+ylabel(ax2,'Velocity RMSE (m/s)');
+title(ax2,'RTK Outage');
+grid(ax2,'on');
+box(ax2,'on');
+set(ax2,'FontSize',11,'Layer','top');
+
+legend(ax2,[hDirect2 hFilter2 hReq2 hOutage], ...
+    {'Direct RTK + IMU','Kalman Filter', ...
+     '0.10 m/s Requirement','RTK Outage'}, ...
+    'Location','southeast');
 
 % Print aggregate metrics
 
@@ -361,10 +559,27 @@ for caseIndex = 1:nCases
 
 end
 
-plotMonteCarloPaths(waypoints, p_true, paths_direct_mc, paths_kf_mc, positionRequirement, sprintf('Normal Operation — %d Monte Carlo Trials', nTrials));
+% ADDED: velocity aggregate metrics (exact mirror of the position loop above)
+fprintf('\nMonte Carlo results, velocity: %d trials\n', nTrials);
 
-plotMonteCarloPaths(waypoints, p_true, paths_direct_rtkOut_mc, paths_kf_rtkOut_mc, positionRequirement, ...
-    sprintf('RTK Outage %.0f–%.0f s — %d Monte Carlo Trials', outageStart, outageEnd, nTrials));
+for caseIndex = 1:nCases
+
+    fprintf('\n%s\n', caseNames{caseIndex});
+    fprintf('  Pooled velocity RMSE: %.4f m/s\n', pooledVelocityRMSE_mc(caseIndex));
+    fprintf('  Mean trial maximum error: %.4f m/s\n', meanTrialMaximumVel_mc(caseIndex));
+    fprintf('  Worst observed error: %.4f m/s\n', worstObservedErrorVel_mc(caseIndex));
+    fprintf('  Trials entirely within 10 cm/s: %.1f%%\n', percentTrialsWithinVelRequirement_mc(caseIndex));
+
+end
+
+plotMonteCarloPaths(waypoints, p_true, paths_direct_mc, ...
+    paths_kf_mc, positionRequirement, ...
+    sprintf('Normal Operation — %d Monte Carlo Trials', nTrials));
+
+plotMonteCarloPaths(waypoints, p_true, paths_direct_rtkOut_mc, ...
+    paths_kf_rtkOut_mc, positionRequirement, ...
+    sprintf('RTK Outage %.0f–%.0f s — %d Monte Carlo Trials', ...
+    outageStart, outageEnd, nTrials));
 
 function plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration)
 
@@ -384,7 +599,6 @@ function plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration)
 
     % Plot speed and acceleration
     figure;
-
     subplot(2,1,1);
     plot(t, trueSpeed, 'b-');
     yline(maxSpeed, 'r--', 'Speed limit');
@@ -581,4 +795,3 @@ function [H, R_rtk] = buildRtkMeasurementModel(rtkPositionStd, rtkVelocityStd)
     R_rtk = diag(measurementStd.^2);
 
 end
-
