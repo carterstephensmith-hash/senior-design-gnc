@@ -52,7 +52,7 @@ function plotMonteCarloPaths(waypoints, p_true, directPaths, kfPaths, ...
         % Plot all trial trajectories
         hEstimates = plot(ax(method),east,north, ...
             'Color',colors(method,:), ...
-            'LineWidth',0.7);
+            'LineWidth',0.3);
 
         % True trajectory
         hTrue = plot(ax(method),p_true(1,:),p_true(2,:), ...
@@ -85,6 +85,8 @@ function plotMonteCarloPaths(waypoints, p_true, directPaths, kfPaths, ...
             'FontSize',9);
 
     end
+
+set(ax, 'XLim', [0, 5], 'YLim', [0, 5]);
 
     %% Match coordinate limits across both panels
 

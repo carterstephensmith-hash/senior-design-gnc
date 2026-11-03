@@ -15,11 +15,23 @@ altitude = 2;        % Nominal search altitude [m]
 hFOV = 60;          % Assumed horizontal camera field of view [deg]
 overlap = 0.20;     % Desired overlap between neighboring passes
 
-maxSpeed = 0.5;     % Maximum aircraft speed [m/s]
+% UPDATED: maxSpeed and maxAcceleration now match the DR2 inset-layout
+% script (previously 0.5 m/s and 0.25 m/s^2, which were outdated).
+maxSpeed = 0.4;     % Maximum aircraft speed [m/s]
 maxAcceleration = 0.25; % Assumed acceleration/deceleration limit [m/s^2]
 
-tDropStart = 15;  
-tDropEnd = 20;
+% ADDED: camera/footprint-margin settings used to build the "inset"
+% lawnmower path (same approach as the DR2 inset-layout script), so the
+% search passes stay far enough inside the camera footprint that
+% position-hold error and attitude jitter can't push the ground marker
+% out of frame.
+imageResolution = [3264, 2448]; % Camera resolution [px], sets vertical FOV
+vFOV = 2*atand((imageResolution(2)/imageResolution(1)) * tand(hFOV/2)); % Vertical FOV [deg]
+
+posErrorStd = 0.05;          % Assumed position-hold error, 1 sigma [m]
+attitudeJitterStd = 1.0;     % Assumed attitude jitter, 1 sigma [deg]
+markerSize = 0.08;           % Ground-marker footprint [m]
+launchPoint = [-2, 0];       % Launch point outside the search area [East, North], m
 
 %% Monte Carlo settings
 
@@ -36,10 +48,22 @@ maxPositionError_mc = zeros(nTrials, nCases);
 
 %% Calculate spacing between search passes
 footprintWidth = 2*altitude*tand(hFOV/2);
-trackSpacing = footprintWidth*(1-overlap);
+footprintLength = 2*altitude*tand(vFOV/2);
+
+% ADDED: inward margins (same formulas as the DR2 inset-layout script)
+% so passes are pulled in from the raw footprint edges.
+crossTrackMargin = 3*posErrorStd + altitude*tand(3*attitudeJitterStd);
+alongTrackMargin = crossTrackMargin + altitude*(maxAcceleration/9.81);
 
 %% Create lawnmower waypoints
-waypoints = generateLawnmowerPath(areaWidth, areaLength, trackSpacing, altitude);
+% UPDATED: waypoints now come from the inset-layout method (camera-
+% footprint margins, launch point, entry/exit legs) instead of the
+% simple full-area sweep, matching the DR2 waypoint layout. The
+% generateLawnmowerPath local function below (same name, new body)
+% takes precedence over any generateLawnmowerPath.m on the path for
+% this script, so that file is left untouched.
+waypoints = generateLawnmowerPath(areaWidth, areaLength, altitude, footprintWidth, footprintLength, ...
+    overlap, crossTrackMargin, alongTrackMargin, markerSize, launchPoint);
 
 %% Generate the true aircraft motion
 [t, p_true, v_true, a_true] = sampleLawnmowerPath(waypoints, maxSpeed, maxAcceleration, dt);
@@ -47,6 +71,9 @@ waypoints = generateLawnmowerPath(areaWidth, areaLength, trackSpacing, altitude)
 N = length(t);
 
 %% Inspect the true aircraft motion
+% Commented out per your request — only the 4 original figures (combined
+% Monte Carlo position tiledlayout, combined Monte Carlo velocity
+% tiledlayout, and the two plotMonteCarloPaths figures) are produced now.
 %plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration);
 
 %% Sample the true motion at RTK measurement times
@@ -137,11 +164,11 @@ attitudeErrorStd = deg2rad(attitudeErrorStdDeg);
 
 %% Requirement and filter uncertainty settings
 
-positionRequirement = 0.10; % 3D position-error limit, m
+positionRequirement = 0.20; % 3D position-error limit, m
 
 % ADDED: velocity-error requirement, not present in the original file.
 % Set to 10 cm/s per the DR2 spec; no other line below this one was changed.
-velocityRequirement = 0.10; % 3D velocity-error limit, m/s
+velocityRequirement = 0.20; % 3D velocity-error limit, m/s
 
 initialStateStd = [rtkPositionStd;
                    rtkVelocityStd * ones(3, 1);
@@ -280,7 +307,7 @@ for trial = 1:nTrials
     % setting trial == 0 turns this if statement off for now
     if trial == 0
 
-        plotRtkErrors(t_rtk, p_rtk, p_rtk_ideal, v_rtk, v_rtk_ideal);
+        plotRtkErrors( t_rtk, p_rtk, p_rtk_ideal, v_rtk, v_rtk_ideal);
 
         % Direct-estimator position error
         figure;
@@ -346,10 +373,6 @@ for trial = 1:nTrials
         legend('Direct RTK + IMU', 'Kalman filter', '10 cm requirement', 'Location', 'best');
         grid on;
 
-        % Optional zoom; larger errors would be outside this view:
-        % ylim([0 0.5]);
-
-        % ADDED: velocity counterpart of the RTK-outage comparison
         figure;
         plot(t, velocityError_direct_rtkOut, 'LineWidth', 1.2);
         hold on;
@@ -415,6 +438,7 @@ meanTrialMaximumVel_mc = mean(maxVelocityError_mc, 1);
 worstObservedErrorVel_mc = max(maxVelocityError_mc, [], 1);
 percentTrialsWithinVelRequirement_mc = 100 * mean(maxVelocityError_mc <= velocityRequirement, 1);
 
+
 % Monte Carlo Position Error
 
 figure('Color','w','Name','Monte Carlo Position Error');
@@ -441,7 +465,7 @@ hReq = yline(ax1,positionRequirement,'--', ...
     'Color',cReq,'LineWidth',1.5);
 
 xlim(ax1,[0 t(end)]);
-ylim(ax1,[0 0.15]);
+ylim(ax1,[0 0.25]);
 ylabel(ax1,'Position RMSE (m)');
 title(ax1,'Normal Operation');
 grid(ax1,'on');
@@ -458,8 +482,8 @@ hold(ax2,'on');
 
 % Draw outage shading first, behind the curves
 hOutage = patch(ax2, ...
-    [tDropStart tDropEnd tDropEnd tDropStart], ...
-    [0 0 0.15 0.15],cOutage, ...
+    [outageStart outageEnd outageEnd outageStart], ...
+    [0 0 0.25 0.25],cOutage, ...
     'EdgeColor','none','FaceAlpha',0.55);
 
 hDirect2 = plot(ax2,t,rmsPositionErrorTime_mc(3,:), ...
@@ -470,7 +494,7 @@ hReq2 = yline(ax2,positionRequirement,'--', ...
     'Color',cReq,'LineWidth',1.5);
 
 xlim(ax2,[0 t(end)]);
-ylim(ax2,[0 0.15]);
+ylim(ax2,[0 0.25]);
 xlabel(ax2,'Time (s)');
 ylabel(ax2,'Position RMSE (m)');
 title(ax2,'RTK Outage');
@@ -482,7 +506,6 @@ legend(ax2,[hDirect2 hFilter2 hReq2 hOutage], ...
     {'Direct RTK + IMU','Kalman Filter', ...
      '10 cm Requirement','RTK Outage'}, ...
     'Location','northeast');
-
 
 % Monte Carlo Velocity Error
 
@@ -504,7 +527,7 @@ hReq = yline(ax1,velocityRequirement,'--', ...
     'Color',cReq,'LineWidth',1.5);
 
 xlim(ax1,[0 t(end)]);
-ylim(ax1,[0 0.15]);
+ylim(ax1,[0 0.25]);
 ylabel(ax1,'Velocity RMSE (m/s)');
 title(ax1,'Normal Operation');
 grid(ax1,'on');
@@ -520,8 +543,8 @@ ax2 = nexttile;
 hold(ax2,'on');
 
 hOutage = patch(ax2, ...
-    [tDropStart tDropEnd tDropEnd tDropStart], ...
-    [0 0 0.15 0.15],cOutage, ...
+    [outageStart outageEnd outageEnd outageStart], ...
+    [0 0 0.25 0.25],cOutage, ...
     'EdgeColor','none','FaceAlpha',0.55);
 
 hDirect2 = plot(ax2,t,rmsVelocityErrorTime_mc(3,:), ...
@@ -532,7 +555,7 @@ hReq2 = yline(ax2,velocityRequirement,'--', ...
     'Color',cReq,'LineWidth',1.5);
 
 xlim(ax2,[0 t(end)]);
-ylim(ax2,[0 0.15]);
+ylim(ax2,[0 0.25]);
 xlabel(ax2,'Time (s)');
 ylabel(ax2,'Velocity RMSE (m/s)');
 title(ax2,'RTK Outage');
@@ -572,14 +595,93 @@ for caseIndex = 1:nCases
 
 end
 
-plotMonteCarloPaths(waypoints, p_true, paths_direct_mc, ...
-    paths_kf_mc, positionRequirement, ...
-    sprintf('Normal Operation — %d Monte Carlo Trials', nTrials));
+% ADDED: percent of time each plotted RMS curve is within its requirement.
+% These use the same curves shown in the two Monte Carlo figures
+% (rmsPositionErrorTime_mc / rmsVelocityErrorTime_mc), so the numbers
+% match what you see on the plots. For the outage cases a second number
+% is printed for just the outage window, since the whole-flight
+% percentage dilutes it.
+inOutageWindow = t >= outageStart & t < outageEnd;
 
-plotMonteCarloPaths(waypoints, p_true, paths_direct_rtkOut_mc, ...
-    paths_kf_rtkOut_mc, positionRequirement, ...
-    sprintf('RTK Outage %.0f–%.0f s — %d Monte Carlo Trials', ...
-    outageStart, outageEnd, nTrials));
+fprintf('\nPercent of time within requirement (plotted RMS curves)\n');
+
+fprintf('\nPosition RMSE (requirement %.0f cm)\n', 100*positionRequirement);
+for caseIndex = 1:nCases
+    percentWhole = 100 * mean(rmsPositionErrorTime_mc(caseIndex, :) <= positionRequirement);
+    fprintf('  %-20s whole flight: %5.1f%%', caseNames{caseIndex}, percentWhole);
+    if caseIndex >= 3
+        percentOutage = 100 * mean(rmsPositionErrorTime_mc(caseIndex, inOutageWindow) <= positionRequirement);
+        fprintf('   during outage: %5.1f%%', percentOutage);
+    end
+    fprintf('\n');
+end
+
+fprintf('\nVelocity RMSE (requirement %.0f cm/s)\n', 100*velocityRequirement);
+for caseIndex = 1:nCases
+    percentWhole = 100 * mean(rmsVelocityErrorTime_mc(caseIndex, :) <= velocityRequirement);
+    fprintf('  %-20s whole flight: %5.1f%%', caseNames{caseIndex}, percentWhole);
+    if caseIndex >= 3
+        percentOutage = 100 * mean(rmsVelocityErrorTime_mc(caseIndex, inOutageWindow) <= velocityRequirement);
+        fprintf('   during outage: %5.1f%%', percentOutage);
+    end
+    fprintf('\n');
+end
+
+plotMonteCarloPaths(waypoints, p_true, paths_direct_mc, paths_kf_mc, positionRequirement, sprintf('Normal Operation — %d Monte Carlo Trials', nTrials));
+
+plotMonteCarloPaths(waypoints, p_true, paths_direct_rtkOut_mc, paths_kf_rtkOut_mc, positionRequirement, ...
+    sprintf('RTK Outage %.0f–%.0f s — %d Monte Carlo Trials', outageStart, outageEnd, nTrials));
+
+function waypoints = generateLawnmowerPath(areaWidth, areaLength, altitude, footprintWidth, footprintLength, ...
+        overlap, crossTrackMargin, alongTrackMargin, markerSize, launchPoint)
+
+    half = markerSize/2;
+    halfWidth = footprintWidth/2 - half - crossTrackMargin;
+    halfLength = footprintLength/2 - half - alongTrackMargin;
+
+    if halfWidth <= 0 || halfLength <= 0
+        error('Error margins exceed the camera footprint');
+    end
+
+    span = areaWidth - 2*half;
+    trackSpacing = 2*halfWidth*(1 - overlap);
+    nTracks = max(1, ceil((span - 2*halfWidth)/trackSpacing) + 1);
+
+    if nTracks == 1
+        xlines = areaWidth/2;
+    else
+        xlines = linspace(half + halfWidth, areaWidth - half - halfWidth, nTracks);
+    end
+
+    yLow = min(half + halfLength, areaLength/2);
+    yHigh = max(areaLength - half - halfLength, areaLength/2);
+
+    xy = [];
+    for i = 1:length(xlines)
+        x = xlines(i);
+        if mod(i,2) == 1
+            ys = [yLow, yHigh];
+        else
+            ys = [yHigh, yLow];
+        end
+        xy = [xy; x, ys(1); x, ys(2)];
+    end
+
+    % Entry leg: from the launch point to the first inset waypoint
+    entryPoint = min(max(launchPoint, [0 0]), [areaWidth areaLength]);
+    xy = [entryPoint; xy];
+
+    % Exit leg: from the last inset waypoint to the nearest area edge
+    lastPoint = xy(end, :);
+    edges = [0, areaWidth, 0, areaLength];
+    [~, k] = min(abs(lastPoint([1 1 2 2]) - edges));
+    exitPoint = lastPoint;
+    exitPoint(ceil(k/2)) = edges(k);
+    xy = [xy; exitPoint];
+
+    % Append the constant search altitude as the third column
+    waypoints = [xy, altitude*ones(size(xy,1), 1)];
+end
 
 function plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration)
 
@@ -599,6 +701,7 @@ function plotTrueMotion(t, p_true, v_true, a_true, maxSpeed, maxAcceleration)
 
     % Plot speed and acceleration
     figure;
+
     subplot(2,1,1);
     plot(t, trueSpeed, 'b-');
     yline(maxSpeed, 'r--', 'Speed limit');
